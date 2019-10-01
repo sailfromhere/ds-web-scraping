@@ -1,0 +1,433 @@
+---
+title: "Data Scientist Jobs in San Francisco Bay Area"
+author: "Kevin Yu"
+date: "9/24/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, include=FALSE}
+
+library(tidyverse)
+library(rvest)
+
+```
+
+## Abstract
+
+Data Scientist is currently one of the most sought after positions by employers, and San Francisco Bay Area, the center of technology companies big and small, is the place that offers the largest amount of such positions with some of the highest pays. As a student of business Analytics, with Data Scientist as one of my potential career paths, it is of my greatest interest to investigate the job market in the Bay Area for Data Scientists.
+
+In this assignment, I scraped the data on `indeed.com` with the `rvest` package, searching for job positions matching "data scientist" and within 25 miles of San Francisco Bay Area. I also used regular expressions to detect common data skills, such as R and Python, from job descriptions, to see which skills are the most sought after. I then used `ggplot2` for visual analyses and `tm` and `wordcloud` to build a wordcloud of the job descriptions.
+
+In the analysis part, I found that 
+
+* San Francisco is the most prominent city that offers the most Data Scientist jobs around the Bay Area (suprise)
+
+* The most common salaries for Data Scientist positions are around 100k to 200k in the Bay Area
+
+* The most frequently required skill is Python
+
+* The wordcloud of the job descriptions are full of generic words such as "data" and "experience", but curiously, "machine" and "learning" are notably prominent
+
+## Web Scraping
+
+I first searched `indeed.com` for "data scientist" jobs within 25 miles of "San Francisco Bay Area, CA", with 50 jobs per page. There were a total of 20 pages. I proceeded to generate the 20 urls:
+
+```{r links, eval=FALSE}
+
+# url of indeed.com
+indeed <- "https://www.indeed.com"
+
+# base url of the search result
+search_result_base <- "https://www.indeed.com/jobs?q=data+scientist&l=San+Francisco+Bay+Area%2C+CA&limit=50&radius=25"
+
+# generate 20 page numbers
+page_num <- seq(0, 950, by = 50)
+
+# paste each link together
+search_result <- paste0(search_result_base, "&start=", page_num)
+
+```
+
+Then I used the SelectorGadget on Chrome to find the html nodes of the links to each job, and scraped the web to get a total of 1081 jobs.
+
+```{r urls, eval=FALSE}
+
+# loop over 20 pages for partial url to the jobs
+url_list <- list()
+for (i in seq_along(search_result)) {
+  url_list[[i]] <- read_html(search_result[i]) %>%
+    html_nodes("#resultsCol .jobtitle") %>%
+    html_attr("href")
+}
+
+# put all partial urls into one vector
+partial_url <- c(url_list[[1]], url_list[[2]],
+                 url_list[[3]], url_list[[4]], 
+                 url_list[[5]], url_list[[6]], 
+                 url_list[[7]], url_list[[8]], 
+                 url_list[[9]], url_list[[10]], 
+                 url_list[[11]], url_list[[12]], 
+                 url_list[[12]], url_list[[14]], 
+                 url_list[[15]], url_list[[16]], 
+                 url_list[[17]], url_list[[18]], 
+                 url_list[[19]], url_list[[20]])
+
+# paste partial url to indeed.com
+full_url <- paste0(indeed, partial_url)
+
+```
+
+I wrote a `get_job` function that, within each job page, scrapes the job title, company name, location, salary information, and job description:
+
+```{r get_job function, eval=FALSE}
+
+get_job <- function(url) {
+  
+  # read job page
+  job <- read_html(url)
+  
+  # get job title
+  title <- job %>%
+    html_nodes(".jobsearch-JobInfoHeader-title") %>%
+    html_text()
+  
+  # info is a vector that contains 3 strings:
+  # company name, "-", and salary information
+  info <- job %>%
+    html_nodes(".icl-u-xs-mr--xs") %>%
+    html_text()
+  
+  # store company name
+  company <- info[1]
+  
+  # store salary information
+  salary <- info[3]
+  
+  # get location
+  location <- job %>%
+    html_nodes(".jobsearch-DesktopStickyContainer-companyrating") %>%
+    html_text() %>%
+    str_extract("(?<=\\-).+")
+  
+  # get job description
+  description <- job %>%
+    html_nodes("#jobDescriptionText") %>%
+    html_text()
+  
+  # return a tibble
+  out <- tibble(
+    url = url,
+    title = title,
+    company = company,
+    location = location,
+    salary = salary,
+    description = description
+  )
+  
+  return(out)
+  
+}
+
+```
+
+And I applied the function to each job page:
+
+```{r ds, eval=FALSE}
+
+# generate empty outcome dataframe
+ds <- tibble(
+  title = character(0),
+  company = character(0),
+  location = character(0),
+  salary = character(0),
+  description = character(0)
+)
+
+# loop over all jobs and apply get_job function
+for (url in full_url) {
+  
+  ds <- ds %>%
+    bind_rows(get_job(url))
+  
+}
+
+# export to .csv file
+write_csv(ds, "ds_san_francisco.csv")
+
+```
+
+After writing the dataframe into a `.csv` file, I changed all the above trunks into `eval = FALSE` to prevent those codes from running again everytime I knit, so that I won't encounter unexpected internet connection error or the data won't change because new jobs are posted everyday. From this point forward, I will only work with the data I have already scraped.
+
+## Data Cleansing
+
+For data cleansing, I separated the `location` column into `city`, `state`, and `zipcode`, and I standardized the salary information into `minsalary` and `maxsalary`.
+
+```{r cleansing, warning=FALSE, message=FALSE}
+
+ds <- read_csv("ds_san_francisco.csv")
+
+# drop one observation that doesn't have company name and location
+df1 <- ds %>%
+  drop_na(location)
+
+# fix unexpected entries in the location column
+df2 <- df1
+for (i in 1:nrow(df1)) {
+  
+  if (str_detect(df2[i,3], "\\-") == TRUE){
+    df2[i,3] <- df2[i,3] %>%
+      str_extract_all("(?<=\\-).+")
+  }
+  
+  df2[i,4] <- df2[i,4] %>%
+    str_remove(" a year") %>%
+    str_remove("From ") %>%
+    str_remove(" an hour")
+  
+}
+
+# separate location column into city, state, and zipcode
+df3 <- df2 %>%
+  
+  separate(location, 
+           into = c("city", "temp"),
+           sep = ", ") %>%
+  separate(temp, 
+           into = c("state", "zipcode"),
+           sep = " ") %>%
+  separate(salary,
+           into = c("minsalary", "maxsalary"),
+           sep = " \\- ") %>%
+  
+  # parse salary as numbers
+  mutate(minsalary = parse_number(minsalary)) %>%
+  mutate(maxsalary = parse_number(maxsalary)) %>%
+  
+  # remove positions that offer hourly wages
+  filter(minsalary > 1000 | is.na(minsalary))
+
+df3[,3:7]
+
+# make job descriptions lower-case
+df4 <- df3
+for(i in 1:nrow(df4)) {
+  
+  df4[i,8] <- str_to_lower(df4[i,8])
+  
+}
+
+```
+
+I then used regular expressions to detect what skills are mentioned in each job's description:
+
+```{r add skills}
+
+df5 <- df4
+
+# generate empty columns
+df5$python <- NA
+df5$r <- NA
+df5$sql <- NA
+df5$sas <- NA
+df5$c <- NA
+df5$java <- NA
+
+# loop over each observatoin
+for (i in 1:nrow(df5)) {
+  
+  # detect python
+  if (str_detect(df5[i,8], "python")) {
+    df5[i,10] <- "TRUE"
+  } else {
+    df5[i,10] <- "FALSE"
+  }
+  
+  # detect r
+  if (str_detect(df5[i,8],
+                 paste(c("(?<=[:blank:])r(?![:alpha:])",
+                         "(?<![:alpha:])r(?=[:blank:])",
+                         "(?<=[:punct:])r(?![:alpha:])",
+                         "(?<![:alpha:])r(?=[:punct:])"), 
+                       collapse = "|"))) {
+    df5[i,11] <- "TRUE"
+  } else {
+    df5[i,11] <- "FALSE"
+  }
+  
+  # detect sql
+  if (str_detect(df5[i,8], "sql")) {
+    df5[i,12] <- "TRUE"
+  } else {
+    df5[i,12] <- "FALSE"
+  }
+  
+  # detect sas
+  if (str_detect(df5[i,8], "sas")) {
+    df5[i,13] <- "TRUE"
+  } else {
+    df5[i,13] <- "FALSE"
+  }
+  
+  # detect c, including c++, c#, objective c
+  if (str_detect(df5[i,8],
+                 paste(c("(?<=[:blank:])c(?![:alpha:])",
+                         "(?<![:alpha:])c(?=[:blank:])",
+                         "(?<=[:punct:])c(?![:alpha:])",
+                         "(?<![:alpha:])c(?=[:punct:])",
+                         "c\\+\\+", "c\\#", "objective c",
+                         "objective\\-c"), 
+                       collapse = "|"))) {
+    df5[i,14] <- "TRUE"
+  } else {
+    df5[i,14] <- "FALSE"
+  }
+  
+  # detect java, but not javascript
+  if (str_detect(df5[i,8], "java(?![:alpha:])")) {
+    df5[i,15] <- "TRUE"
+  } else {
+    df5[i,15] <- "FALSE"
+  }
+  
+}
+
+df <- df5
+
+df[10:15]
+
+```
+
+## Analysis
+
+### Cities
+
+San Francisco is, undoubtedly, the most prominent city around the Bay Area, but other cities, such as Redwood City and San Mateo, also offer a lot of Data Scientist jobs, if one seeks opportunities around that area.
+
+```{r city}
+
+df$city <- fct_rev(fct_infreq(as.factor(df$city)))
+
+ggplot(df, aes(city, fill = city)) +
+  geom_bar() +
+  labs(title = "Data Scientist Job Opportunities in Bay Area by Cities",
+       x = "City",
+       y = "Frequency") +
+  coord_flip() +
+  theme_classic() +
+  theme(legend.position = "none")
+  
+
+```
+
+### Salary
+
+Most of the jobs I scraped do not provide salary data. In fact, less than 100 positions out of the 1000+ provide salary information. Out of those, a salary around \$100k to \$200k is the most common, but some offers as high as over \$300k and some are as low as just obove \$50k.
+
+```{r salary, warning=FALSE}
+
+summary(df$minsalary)
+
+ggplot(df, aes(minsalary, maxsalary)) +
+  geom_jitter(color = "red", alpha = 0.8) +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Salaries for Data Scientist Positions",
+       x = "Min Salary",
+       y = "Max Salary") +
+  theme_classic()
+
+```
+
+### Skills
+
+Out of the 6 skills I decided to detect, Python is the most frequently sought after skill, mentioned by over 66% of the jobs, followed by R and SQL. Other programming languages, such as C and Java, are less frequently required, with a mention rate less than 25%. SAS is the least required among the 6, but by no means obsolete.
+
+```{r skills, message=FALSE, warning=FALSE}
+
+python <- table(df$python)
+r <- table(df$r)
+sql <- table(df$sql)
+sas <- table(df$sas)
+c <- table(df$c)
+java <- table(df$java)
+
+skills <- tibble(
+  Skill = c("Python", "R", "SQL", 
+            "SAS", "C", "Java"),
+  Required = c(python[2],
+               r[2],
+               sql[2],
+               sas[2],
+               c[2],
+               java[2]),
+  `Not Required` = c(python[1],
+                     r[1],
+                     sql[1],
+                     sas[1],
+                     c[1],
+                     java[1])
+)
+
+skills
+
+library(reshape2)
+
+melt(skills, measure.vars = c("Required","Not Required"),
+     variable.name = "Requirement", value.name = "Value") %>%
+  ggplot(aes(Skill, Value, fill = fct_rev(as.factor(Requirement)))) +
+  geom_bar(stat = "identity", position = "fill") +
+  labs(title = "Skills Required by Data Scientist Positions",
+       x = "Skills",
+       y = "Percentage",
+       fill = "Requirement") +
+  scale_y_continuous(labels = scales::percent) +
+  theme_classic()
+
+```
+
+### Wordcloud
+
+It would also be interesting to look at what are some of the most frequently used words in the job descriptions. Most of the words are generic, such as "data" and "experience", since they are data jobs and we are looking at job descriptions. However, "machine" and "learning" are notably prominent as well, suggesting that machine learning is an important skill for Data Scientists to have.
+
+```{r wordcloud, warning=FALSE, message=FALSE}
+
+library(tm)
+library(wordcloud)
+
+treat_corpus <- Corpus(VectorSource(df$description))
+
+treat_corpus <- treat_corpus %>%
+  tm_map(removePunctuation) %>%
+  tm_map(removeNumbers) %>%
+  tm_map(removeWords, stopwords("english"))
+
+wordcloud(treat_corpus, max.words = 100, min.words = 5,
+          random.order = F, colors = brewer.pal(8, "Dark2"))
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
